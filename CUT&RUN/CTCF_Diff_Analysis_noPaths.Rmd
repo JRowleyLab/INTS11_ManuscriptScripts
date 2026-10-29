@@ -1,0 +1,935 @@
+---
+title: "ATAC_Diff_Analysis"
+author: "Tim Reznicek"
+date: "2025-04-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+``` {r}
+#
+
+# adapted from https:6
+
+# load dependencies
+library(ChIPseeker)
+library(csaw)
+library(edgeR)
+library(GenomicRanges)
+library(ggplot2)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(dplyr)
+library(Rsamtools)
+library(rtracklayer)
+
+```
+
+``` {r}
+# read peaks files and convert to GRanges
+# CTL Peaks
+AUT.peaks <- read.table("anti-CTCF.INTS1-aux_1_frag.bedgraph", sep="\t")[,1:3]
+BUT.peaks <- read.table("anti-CTCF.INTS1-aux_2_frag.bedgraph", sep="\t")[,1:3]
+#CUT.peaks <- read.table("anti-CTCF.INTS1-aux_3_frag.bedgraph", sep="\t")[,1:3]
+colnames(AUT.peaks) <- c("chrom", "start", "end")
+colnames(BUT.peaks) <- c("chrom", "start", "end")
+#colnames(CUT.peaks) <- c("chrom", "start", "end")
+AUT.peaks <- GRanges(AUT.peaks)
+BUT.peaks <- GRanges(BUT.peaks)
+#CUT.peaks <- GRanges(CUT.peaks)
+#UT.peaks <- intersect(intersect(AUT.peaks, BUT.peaks), CUT.peaks)
+UT.peaks <- intersect(AUT.peaks, BUT.peaks)
+
+# INTS11 Peaks
+AINTS11.peaks <- read.table("anti-CTCF.INTS11+aux_1_frag.bedgraph", sep="\t")[,1:3]
+BINTS11.peaks <- read.table("anti-CTCF.INTS11+aux_2_frag.bedgraph", sep="\t")[,1:3]
+
+colnames(AINTS11.peaks) <- c("chrom", "start", "end")
+colnames(BINTS11.peaks) <- c("chrom", "start", "end")
+
+AINTS11.peaks <- GRanges(AINTS11.peaks)
+BINTS11.peaks <- GRanges(BINTS11.peaks)
+
+MINTS11.peaks <- intersect(AINTS11.peaks, BINTS11.peaks)
+
+# INTS1 Peaks
+AINTS1.peaks <- read.table("anti-CTCF.INTS1+aux_2_frag.bedgraph", sep="\t")[,1:3]
+BINTS1.peaks <- read.table("anti-CTCF.INTS1+aux_3_frag.bedgraph", sep="\t")[,1:3]
+colnames(AINTS1.peaks) <- c("chrom", "start", "end")
+colnames(BINTS1.peaks) <- c("chrom", "start", "end")
+AINTS1.peaks <- GRanges(AINTS1.peaks)
+BINTS1.peaks <- GRanges(BINTS1.peaks)
+MINTS1.peaks <- intersect(AINTS1.peaks, BINTS1.peaks)
+
+all.peaks <- union(union(UT.peaks, MINTS1.peaks), MINTS11.peaks)
+print("Completed")
+```
+
+``` {r}
+# prep blacklist and chromosome restriction
+blacklist <- read.table("hg38-blacklist.v2.bed", sep="\t")
+colnames(blacklist) <- c("chrom", "start", "end")
+blacklist <- GRanges(blacklist)
+standard.chr <- paste0("chr", c(1:19, "X", "Y"))
+param <- readParam(max.frag=1000, pe="both", discard=blacklist, restrict=standard.chr)
+print("Completed")
+```
+
+```{r}
+# load and count reads from bam files
+pe.bams <- c(
+  "anti-CTCF.INTS1-aux_1.sorted.bam",
+  "anti-CTCF.INTS1-aux_2.sorted.bam",
+  #"anti-CTCF.INTS1-aux_3.sorted.bam",
+  "anti-CTCF.INTS11+aux_1.sorted.bam",
+  "anti-CTCF.INTS11+aux_2.sorted.bam",
+  "anti-CTCF.INTS1+aux_2.sorted.bam",
+  "anti-CTCF.INTS1+aux_3.sorted.bam"
+)
+peak.counts <- regionCounts(pe.bams, all.peaks, param=param)
+peak.abundances <- aveLogCPM(asDGEList(peak.counts))
+peak.counts.filt <- peak.counts[peak.abundances > -3, ]
+
+
+# generate window counts (NOTE: MAYBE CHANGE CONSTANT VALUES?)
+counts <- windowCounts(pe.bams, width=300, param=param)
+neighbor <- suppressWarnings(resize(rowRanges(counts), width=2000, fix="center"))
+wider <- regionCounts(pe.bams, regions=neighbor, param=param)
+filter.stat <- filterWindowsLocal(counts, wider)
+counts.local.filt <- counts[filter.stat$filter > log2(3),]
+print("Completed")
+```
+
+```{r}
+# MACS TMM normalization
+binned <- windowCounts(pe.bams, bin=TRUE, width=10000, param=param)
+working.windows <- peak.counts.filt
+working.windows <- normFactors(binned, se.out=working.windows)
+```
+
+```{r}
+# setup design matrix
+y <- asDGEList(working.windows)
+colnames(y$counts) <- c(
+  "AUT", "BUT", #"CUT",
+  "AINTS11", "BINTS11",
+  "AINTS1", "BINTS1"
+)
+rownames(y$samples) <- c(
+  "AUT", "BUT", #"CUT",
+  "AINTS11", "BINTS11",
+  "AINTS1", "BINTS1"
+)
+y$samples$group <- c(
+  "UT", "UT", #"UT",
+  "MINTS11", "MINTS11",
+  "MINTS1", "MINTS1"
+)
+design <- model.matrix(~0+group, data=y$samples)
+print(design)
+colnames(design) <- c("UT", "MINTS11", "MINTS1")
+print("Completed")
+```
+
+```{r}
+# differential accessibility testing
+y <- estimateDisp(y, design)
+fit <- glmFit(y, design)
+lrt <- glmLRT(fit, coef = 2)
+csaw_deg_table <- as.data.frame(topTags(lrt, n = nrow(y), sort.by = 'PValue'))
+csaw_deg_table <- csaw_deg_table %>%
+  dplyr::mutate(gene = rownames(csaw_deg_table),
+                type = ifelse(FDR < 0.05 & abs(logFC) > 1.0, 'significant', 'not significant')) %>%
+  dplyr::select(gene, logFC, logCPM, PValue, FDR, type)
+fig_ma <- csaw_deg_table %>%
+  ggplot(aes(x = logCPM, y = logFC, color = type)) +
+  geom_point() +
+  scale_color_manual(values = c('#666666', '#d62728'))
+print(fig_ma)
+```
+
+```{r}
+
+qlf <- glmQLFit(y, design, robust=TRUE)
+# # MINTS11 v MINTS1
+qlft <- glmQLFTest(qlf, contrast=makeContrasts(UT-MINTS1, levels=design))
+
+
+rowData(working.windows) <- cbind(rowData(working.windows), qlft$table)
+merged.peaks <- mergeWindows(rowRanges(working.windows), tol=500L, max.width=5000L)
+tab.best <- getBestTest(merged.peaks$id, qlft$table)
+final.merged.peaks <- merged.peaks$region
+final.merged.peaks@elementMetadata <- cbind(final.merged.peaks@elementMetadata, tab.best[, -1])
+final.merged.peaks <- final.merged.peaks[order(final.merged.peaks@elementMetadata$FDR), ]
+final.merged.peaks.sig <- final.merged.peaks[final.merged.peaks@elementMetadata$FDR < 0.05, ]
+
+
+# generate plot
+final.merged.peaks$sig <- "n.s"
+final.merged.peaks$sig[final.merged.peaks$FDR < 0.05] <- "significant"
+# ...
+test_df <- as.data.frame(final.merged.peaks)[sample(nrow(as.data.frame(final.merged.peaks)), 15000), ]
+test_df$sig <- "n.s"
+test_df$sig[test_df$FDR < 0.05] <- "significant"
+# ...
+ggplot(data=data.frame(test_df),
+       aes(x = rep.test, y = rep.logFC, col = sig)) +
+    geom_point() + scale_color_manual(values = c("black", "red")) +
+    geom_smooth(inherit.aes = F, aes(x = rep.test, y = rep.logFC), method = "loess") +
+    geom_hline(yintercept = 0) + labs(col = NULL)
+```
+
+```{r}
+
+# differences between G and V annotation
+annotated_final_merged_peaks <- annotatePeak(
+  final.merged.peaks[final.merged.peaks$FDR < 0.05],
+  TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene
+)
+plotAnnoPie(annotated_final_merged_peaks)
+
+annotated_final_merged_peaks_df <- as.data.frame(annotated_final_merged_peaks)
+
+
+# pull promoter peaks
+promoter_de_peaks <- annotated_final_merged_peaks_df[grepl("Promoter", annotated_final_merged_peaks_df$annotation, fixed=TRUE),]
+higher_confidence_promoter_de_peaks <- promoter_de_peaks[promoter_de_peaks$FDR < 0.00001, ]
+head(higher_confidence_promoter_de_peaks[order(higher_confidence_promoter_de_peaks$seqnames, higher_confidence_promoter_de_peaks$start), ])
+MINTS1_biased_promoter_de_peaks <- higher_confidence_promoter_de_peaks[higher_confidence_promoter_de_peaks$direction == "up", ]
+MINTS11_biased_promoter_de_peaks <- higher_confidence_promoter_de_peaks[higher_confidence_promoter_de_peaks$direction == "down", ]
+
+# save promoter peaks to bed
+MINTS1_promoter_bed_df <- data.frame(seqnames=MINTS1_biased_promoter_de_peaks$seqnames,
+                              starts=MINTS1_biased_promoter_de_peaks$start-1,
+                              ends=MINTS1_biased_promoter_de_peaks$end,
+                              names=c(rep(".", length(MINTS1_biased_promoter_de_peaks$strand))),
+                              scores=c(rep(".", length(MINTS1_biased_promoter_de_peaks$strand))),
+                              strands=MINTS1_biased_promoter_de_peaks$strand)
+write.table(
+  MINTS1_promoter_bed_df,
+  file="csaw_edgeR_diff_accessible_MINTS1_biased_peaks_by_promoters.bed",
+  quote=F,
+  sep="\t",
+  row.names=F,
+  col.names=F
+)
+
+MINTS11_promoter_bed_df <- data.frame(seqnames=MINTS11_biased_promoter_de_peaks$seqnames,
+                                     starts=MINTS11_biased_promoter_de_peaks$start-1,
+                                     ends=MINTS11_biased_promoter_de_peaks$end,
+                                     names=c(rep(".", length(MINTS11_biased_promoter_de_peaks$strand))),
+                                     scores=c(rep(".", length(MINTS11_biased_promoter_de_peaks$strand))),
+                                     strands=MINTS11_biased_promoter_de_peaks$strand)
+write.table(
+  MINTS11_promoter_bed_df,
+  file="csaw_edgeR_diff_accessible_MINTS11_biased_peaks_by_promoters.bed",
+  quote=F,
+  sep="\t",
+  row.names=F,
+  col.names=F
+)
+
+
+```
+
+
+Unanswered questions:
+- Diff peaks 1Aux v CTL  
+- Diff peaks 11Aux v CTL  
+- Diff peaks 1Aux v 11Aux  
+ - This may have been answered, but I need to get the df transfer happening  
+- Annotations for the diff peaks in all cases  
+
+
+Differential Comparison to CTL
+```{r}
+# Refit QL model with design
+qlf <- glmQLFit(y, design, robust=TRUE)
+
+# CTL vs MINTS1
+qlft_mints1 <- glmQLFTest(qlf, contrast=makeContrasts(UT - MINTS1, levels=design))
+
+# CTL vs MINTS11
+qlft_mints11 <- glmQLFTest(qlf, contrast=makeContrasts(UT - MINTS11, levels=design))
+
+# MINTS1 vs MINTS11
+#qlft_m1vm11 <- glmQLFTest(qlf, contrast=makeContrasts(MINTS1 - MINTS11, levels=design))
+
+```
+
+
+Merge differential windows and get peaks
+```{r}
+# Shared merged windows for consistency
+merged.peaks <- mergeWindows(rowRanges(working.windows), tol=500L, max.width=5000L)
+
+# Get best window in each merged region
+tab_mints1 <- getBestTest(merged.peaks$id, qlft_mints1$table)
+tab_mints11 <- getBestTest(merged.peaks$id, qlft_mints11$table)
+# tab_m1vm11 <- getBestTest(merged.peaks$id, qlft_m1vm11$table)
+
+# Attach metadata
+final.merged.peaks_mints1 <- merged.peaks$region
+final.merged.peaks_mints1@elementMetadata <- cbind(final.merged.peaks_mints1@elementMetadata, tab_mints1[, -1])
+final.merged.peaks_mints1 <- final.merged.peaks_mints1[order(final.merged.peaks_mints1$FDR), ]
+
+final.merged.peaks_mints11 <- merged.peaks$region
+final.merged.peaks_mints11@elementMetadata <- cbind(final.merged.peaks_mints11@elementMetadata, tab_mints11[, -1])
+final.merged.peaks_mints11 <- final.merged.peaks_mints11[order(final.merged.peaks_mints11$FDR), ]
+
+# final.merged.peaks_m1vm11 <- merged.peaks$region
+# final.merged.peaks_m1vm11@elementMetadata <- cbind(final.merged.peaks_m1vm11@elementMetadata, tab_m1vm11[, -1])
+# final.merged.peaks_m1vm11 <- final.merged.peaks_m1vm11[order(final.merged.peaks_m1vm11$FDR), ]
+
+```
+
+```{r}
+# Fixing lack of retaining colnames
+colnames(mcols(final.merged.peaks_mints1))
+class(final.merged.peaks_mints1)
+summary(final.merged.peaks_mints1$FDR)
+final.merged.peaks_mints1[!is.na(final.merged.peaks_mints1$FDR) & final.merged.peaks_mints1$PValue < 0.01]
+```
+
+Annotate Peaks
+```{r}
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# MINTS1 vs CTL
+annot_mints1 <- annotatePeak(final.merged.peaks_mints1[final.merged.peaks_mints1$PValue < 0.01], 
+                             TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+plotAnnoPie(annot_mints1)
+
+# MINTS11 vs CTL
+annot_mints11 <- annotatePeak(final.merged.peaks_mints11[final.merged.peaks_mints11$PValue < 0.01], 
+                              TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+plotAnnoPie(annot_mints11)
+
+# MINTS11 v MINTS1
+# annot_m1vm11 <- annotatePeak(final.merged.peaks_m1vm11[final.merged.peaks_m1vm11$FDR < 0.05], 
+#                               TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+# plotAnnoPie(annot_m1vm11)
+
+```
+
+Save annotated peaks by up/down
+``` {r}
+# Convert to data frames
+df_mints1 <- as.data.frame(annot_mints1)
+df_mints11 <- as.data.frame(annot_mints11)
+#df_m1vm11 <- as.data.frame(annot_m1vm11)
+
+# Add significance direction labels
+df_mints1$direction <- ifelse(df_mints1$rep.logFC > 0, "up", "down")
+df_mints11$direction <- ifelse(df_mints11$rep.logFC > 0, "up", "down")
+#df_m1vm11$direction <- ifelse(df_m1vm11$rep.logFC > 0, "up", "down")
+
+# Write all significant annotated peaks to file
+write.table(df_mints1, "CTL_vs_MINTS1_annotated_diff_peaks.txt", sep="\t", quote=FALSE, row.names=FALSE)
+write.table(df_mints11, "CTL_vs_MINTS11_annotated_diff_peaks.txt", sep="\t", quote=FALSE, row.names=FALSE)
+#write.table(df_m1vm11, "MINTS1_vs_MINTS11_annotated_diff_peaks.txt", sep="\t", quote=FALSE, row.names=FALSE)
+
+```
+
+```{r}
+# Any difference in direction?
+# Count the number of up and down peaks per annotation type
+df_mints1$annotation_simple <- sub("^(\\w+).*", "\\1", df_mints1$annotation)
+
+annotation_counts <- dplyr::count(
+  filter(df_mints1, direction %in% c("up", "down")),
+  annotation_simple,
+  direction
+)
+
+ggplot(annotation_counts, aes(x = annotation_simple, y = n, fill = direction)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    title = "Distribution of Peak Annotations by Direction",
+    x = "Annotation",
+    y = "Number of Peaks"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("up" = "#1b9e77", "down" = "#d95f02"))
+```
+
+```{r}
+# Any difference in direction?
+# Count the number of up and down peaks per annotation type
+df_mints11$annotation_simple <- sub("^(\\w+).*", "\\1", df_mints11$annotation)
+
+annotation_counts <- dplyr::count(
+  filter(df_mints11, direction %in% c("up", "down")),
+  annotation_simple,
+  direction
+)
+
+ggplot(annotation_counts, aes(x = annotation_simple, y = n, fill = direction)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    title = "Distribution of Peak Annotations by Direction",
+    x = "Annotation",
+    y = "Number of Peaks"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("up" = "#1b9e77", "down" = "#d95f02"))
+```
+
+``` {r}
+# Trying out just promoters I care about
+library(GenomicRanges)
+library(rtracklayer)  # if reading BED
+
+
+# Convert the peak data.frame to GRanges
+peaks_gr <- GRanges(
+  seqnames = df_mints11$seqnames,
+  ranges = IRanges(start = df_mints11$start, end = df_mints11$end),
+  strand = "*",  # CUT&RUN peaks usually aren't strand-specific
+  direction = df_mints11$direction
+)
+
+# Read the gene list BED file (6-column BED)
+genes <- rtracklayer::import("all_genes.bed")
+
+# Get the TSS location based on strand
+tss <- resize(genes, width = 1, fix = ifelse(strand(genes) == "+", "start", "end"))
+
+# Extend ±1kb around TSS
+tss_window <- resize(tss, width = 2001, fix = "center")
+
+# Keep only peaks with "up" or "down" direction
+peaks_gr <- peaks_gr[peaks_gr$direction %in% c("up", "down")]
+
+# Find overlaps
+hits <- findOverlaps(peaks_gr, tss_window)
+
+# Add metadata column for in/out of TSS window
+peaks_gr$in_tss_window <- FALSE
+peaks_gr[queryHits(hits)]$in_tss_window <- TRUE
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Convert GRanges to data.frame for plotting
+peaks_df <- as.data.frame(peaks_gr)
+
+counts <- dplyr::count(
+  peaks_df,
+  in_tss_window,
+  direction
+)
+
+# Add readable region labels
+counts$region <- ifelse(counts$in_tss_window, "±1kb of TSS", "Elsewhere")
+
+# Plot
+ggplot(counts, aes(x = region, y = n, fill = direction)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    title = "CTCF Peak Directionality Around TSS",
+    x = "Region",
+    y = "Number of Peaks"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("up" = "#1b9e77", "down" = "#d95f02"))
+
+
+```
+
+
+``` {r}
+# Trying out just promoters I care about
+library(GenomicRanges)
+library(rtracklayer)  # if reading BED
+
+
+# Convert the peak data.frame to GRanges
+peaks_gr <- GRanges(
+  seqnames = df_mints1$seqnames,
+  ranges = IRanges(start = df_mints1$start, end = df_mints1$end),
+  strand = "*",  # CUT&RUN peaks usually aren't strand-specific
+  direction = df_mints1$direction
+)
+
+# Read the gene list BED file (6-column BED)
+genes <- rtracklayer::import("all_genes.bed")
+
+# Get the TSS location based on strand
+tss <- resize(genes, width = 1, fix = ifelse(strand(genes) == "+", "start", "end"))
+
+# Extend ±1kb around TSS
+tss_window <- resize(tss, width = 4001, fix = "center")
+
+# Keep only peaks with "up" or "down" direction
+peaks_gr <- peaks_gr[peaks_gr$direction %in% c("up", "down")]
+
+# Find overlaps
+hits <- findOverlaps(peaks_gr, tss_window)
+
+# Add metadata column for in/out of TSS window
+peaks_gr$in_tss_window <- FALSE
+peaks_gr[queryHits(hits)]$in_tss_window <- TRUE
+
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Convert GRanges to data.frame for plotting
+peaks_df <- as.data.frame(peaks_gr)
+
+counts <- dplyr::count(
+  peaks_df,
+  in_tss_window,
+  direction
+)
+
+# Add readable region labels
+counts$region <- ifelse(counts$in_tss_window, "±2kb of TSS", "Elsewhere")
+
+# Plot
+ggplot(counts, aes(x = region, y = n, fill = direction)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    title = "CTCF Peak Directionality Around TSS",
+    x = "Region",
+    y = "Number of Peaks"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("up" = "#1b9e77", "down" = "#d95f02"))
+
+
+```
+
+```{r}
+#############
+# BED files for promoters only
+#############
+
+# Filter promoters
+promoters_mints1 <- df_mints1[grepl("Promoter", df_mints1$annotation), ]
+promoters_mints11 <- df_mints11[grepl("Promoter", df_mints11$annotation), ]
+promoters_m1vm11 <- df_m1vm11[grepl("Promoter", df_m1vm11$annotation), ]
+
+# Split by direction
+mints1_up <- promoters_mints1[promoters_mints1$direction == "up", ]
+mints1_down <- promoters_mints1[promoters_mints1$direction == "down", ]
+mints11_up <- promoters_mints11[promoters_mints11$direction == "up", ]
+mints11_down <- promoters_mints11[promoters_mints11$direction == "down", ]
+m1vm11_up <- promoters_m1vm11[promoters_m1vm11$direction == "up", ]
+m1v11_down <- promoters_m1vm11[promoters_m1vm11$direction == "down", ]
+
+# Make BEDs
+write.table(mints1_up[, c("seqnames", "start", "end")], 
+            "M1_up.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(mints1_down[, c("seqnames", "start", "end")], 
+            "M1_down.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(mints11_up[, c("seqnames", "start", "end")], 
+            "M11_up.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(mints11_down[, c("seqnames", "start", "end")], 
+            "M11_down.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(m1vm11_up[, c("seqnames", "start", "end")], 
+            "M1v11_up.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(m1v11_down[, c("seqnames", "start", "end")], 
+            "M1v11_down.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+
+
+
+# Write BEDs
+# write_bed <- function(df, path) {
+#   bed <- data.frame(
+#     seqnames = df$seqnames,
+#     start = df$start - 1,
+#     end = df$end,
+#     name = ".",
+#     score = ".",
+#     strand = df$strand
+#   )
+#   write.table(bed, file=path, sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+# }
+# 
+# write_bed(mints1_up, "CTL_vs_MINTS1_promoter_up.bed")
+# write_bed(mints1_down, "CTL_vs_MINTS1_promoter_down.bed")
+# write_bed(mints11_up, "CTL_vs_MINTS11_promoter_up.bed")
+# write_bed(mints11_down, "CTL_vs_MINTS11_promoter_down.bed")
+
+```
+
+``` {r}
+############
+# Begin Volcano Plots
+############
+
+# GRanges -> dataframe and annotate
+
+library(dplyr)
+library(ggplot2)
+
+prepare_volcano_df <- function(gr, comparison_name) {
+  df <- as.data.frame(gr)
+  df <- df %>%
+    mutate(gene_type = case_when(
+      rep.logFC >= 1 & PValue <= 0.01 ~ "up",
+      rep.logFC <= -1 & PValue <= 0.01 ~ "down",
+      TRUE ~ "ns"
+    )) %>%
+    mutate(
+      log2FoldChange = rep.logFC,
+      pval = PValue,
+      Comparison = comparison_name
+    )
+  return(df)
+}
+
+# Create data frames
+df_mints1_vs_ctl <- prepare_volcano_df(final.merged.peaks_mints1, "MINTS1 vs CTL")
+df_mints11_vs_ctl <- prepare_volcano_df(final.merged.peaks_mints11, "MINTS11 vs CTL")
+#df_mints1_vs_mints11 <- prepare_volcano_df(final.merged.peaks_m1vm11, "MINTS1 vs MINTS11")
+
+
+
+```
+
+``` {r}
+
+##################
+# Volcano plot function
+##################
+
+make_volcano_plot <- function(df, title, outfile) {
+  cols <- c("up" = "red", "down" = "blue", "ns" = "grey")
+  sizes <- c("up" = 2, "down" = 2, "ns" = 1)
+  alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+  p <- ggplot(df, aes(x = log2FoldChange, y = -log10(pval))) +
+    geom_point(aes(fill = gene_type, size = gene_type, alpha = gene_type),
+               shape = 21, colour = "black") +
+    geom_hline(yintercept = -log10(0.01), linetype = "dashed") +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+    scale_fill_manual(values = cols) +
+    scale_size_manual(values = sizes) +
+    scale_alpha_manual(values = alphas) +
+    coord_cartesian(ylim = c(0, 5), xlim = c(-7.5, 7.5)) +
+    labs(title = title,
+         x = "log2(fold change)",
+         y = "-log10(P-value)") +
+    theme_classic(base_family = "Arial") +
+    theme(
+      text = element_text(size = 16, family = "Arial", face = "bold"),
+      axis.title = element_text(size = 16),
+      axis.text = element_text(size = 16, face = "bold"),
+      axis.line = element_line(color = "black", size = 1.2),
+      plot.title = element_text(size = 16, face = "bold")
+    )
+
+  ggsave(filename = outfile, plot = p, width = 12, height = 9)
+  return(p)
+}
+
+```
+
+``` {r}
+
+# Run for all three comparisons
+p1 <- make_volcano_plot(df_mints1_vs_ctl,
+                        "CTCF Diff CUT&RUN: MINTS1 vs CTL",
+                        "volcano_MINTS1_vs_CTL.png")
+
+p2 <- make_volcano_plot(df_mints11_vs_ctl,
+                        "CTCF Diff CUT&RUN: MINTS11 vs CTL",
+                        "volcano_MINTS11_vs_CTL.png")
+
+# p3 <- make_volcano_plot(df_mints1_vs_mints11,
+#                         "ATAC-seq Differential Accessibility: MINTS1 vs MINTS11",
+#                         "volcano_MINTS1_vs_MINTS11.png")
+
+
+```
+
+
+```{r}
+#######################
+# Diff binding using merged bam files
+#######################
+
+union_peaks <- rtracklayer::import("union_peaks_ctl_vs_ints1.bed")
+
+bam_files <- c(
+  "CTCF_INTS1-aux_sorted.bam",
+  "CTCF_INTS1+aux_NoRep1_sort.bam"
+)
+
+blacklist <- rtracklayer::import("hg38-blacklist.v2.bed")
+standard_chr <- paste0("chr", c(1:22, "X", "Y"))
+
+# Read parameters
+param <- readParam(
+  max.frag = 1000,
+  pe = "both",
+  discard = blacklist,
+  restrict = standard_chr
+)
+
+peak_counts <- regionCounts(bam_files, regions = union_peaks, param = param)
+```
+
+```{r}
+#assay(peak_counts)       # raw counts matrix
+rowRanges(peak_counts)   # peak coordinates
+colData(peak_counts)     # sample metadata
+y <- asDGEList(peak_counts)
+colnames(y) <- c("CTL", "INTS1")
+```
+
+```{r}
+# TMM normalization
+y$samples$group <- c("CTL", "INTS1")
+y <- calcNormFactors(y)
+```
+
+```{r}
+# log2 calculations
+logCPM <- cpm(y, log = TRUE)
+log2FC <- logCPM[, "INTS1"] - logCPM[, "CTL"]
+peak_df <- as.data.frame(rowRanges(peak_counts))
+peak_df$log2FC <- log2FC
+
+# classify direction
+peak_df$direction <- ifelse(peak_df$log2FC > 1, "up",
+                            ifelse(peak_df$log2FC < -1, "down", "unchanged"))
+
+# output
+write.table(peak_df, "log2fc_peaks_ctl_vs_ints1.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+``` {r}
+df <- read.table("log2fc_peaks_ctl_vs_ints1.tsv", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+# Convert to GRanges
+peaks_gr <- GRanges(
+  seqnames = df$seqnames,
+  ranges = IRanges(start = df$start, end = df$end),
+  strand = "*",
+  direction = df$direction
+)
+
+# Keep only directional peaks
+peaks_gr <- peaks_gr[peaks_gr$direction %in% c("up", "down")]
+
+```
+
+```{r}
+# Load 6-column BED of promoters of interest
+genes <- import("all_genes.bed")
+
+# Get strand-aware TSS
+tss <- resize(genes, width = 1, fix = ifelse(strand(genes) == "+", "start", "end"))
+
+tss_window <- resize(tss, width = 2001, fix = "center")
+
+# Find overlaps
+hits <- findOverlaps(peaks_gr, tss_window)
+
+# Add in/out TSS window annotation
+peaks_gr$in_tss_window <- FALSE
+peaks_gr[queryHits(hits)]$in_tss_window <- TRUE
+
+# Convert to data.frame
+peaks_df <- as.data.frame(peaks_gr)
+
+# Count by region and direction
+counts <- dplyr::count(peaks_df, in_tss_window, direction)
+
+# Label regions
+counts$region <- ifelse(counts$in_tss_window, "±1kb of TSS", "Elsewhere")
+```
+
+```{r}
+ggplot(counts, aes(x = region, y = n, fill = direction)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    title = "CTCF Peak Directionality Around TSS",
+    x = "Region",
+    y = "Number of Peaks"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("up" = "#1b9e77", "down" = "#d95f02"))
+```
+
+```{r}
+#######################
+# Diff binding using merged bam files
+#######################
+
+union_peaks <- rtracklayer::import("union_peaks_ctl_vs_ints11.bed")
+
+bam_files <- c(
+  "CTCF_INTS1-aux_sorted.bam",
+  "CTCF_INTS11+aux_sorted.bam"
+)
+
+blacklist <- rtracklayer::import("hg38-blacklist.v2.bed")
+standard_chr <- paste0("chr", c(1:22, "X", "Y"))
+
+# Read parameters
+param <- readParam(
+  max.frag = 1000,
+  pe = "both",
+  discard = blacklist,
+  restrict = standard_chr
+)
+
+peak_counts <- regionCounts(bam_files, regions = union_peaks, param = param)
+```
+
+```{r}
+#assay(peak_counts)       # raw counts matrix
+rowRanges(peak_counts)   # peak coordinates
+colData(peak_counts)     # sample metadata
+y <- asDGEList(peak_counts)
+colnames(y) <- c("CTL", "INTS11")
+```
+
+```{r}
+# TMM normalization
+y$samples$group <- c("CTL", "INTS11")
+y <- calcNormFactors(y)
+```
+
+```{r}
+# log2 calculations
+logCPM <- cpm(y, log = TRUE)
+log2FC <- logCPM[, "INTS11"] - logCPM[, "CTL"]
+peak_df <- as.data.frame(rowRanges(peak_counts))
+peak_df$log2FC <- log2FC
+
+# classify direction
+peak_df$direction <- ifelse(peak_df$log2FC > 1, "up",
+                            ifelse(peak_df$log2FC < -1, "down", "unchanged"))
+
+# output
+write.table(peak_df, "log2fc_peaks_ctl_vs_ints11.tsv", sep = "\t", quote = FALSE, row.names = FALSE)
+```
+
+``` {r}
+df <- read.table("log2fc_peaks_ctl_vs_ints11.tsv", header = TRUE, sep = "\t", stringsAsFactors = FALSE)
+
+# Convert to GRanges
+peaks_gr <- GRanges(
+  seqnames = df$seqnames,
+  ranges = IRanges(start = df$start, end = df$end),
+  strand = "*",
+  direction = df$direction
+)
+
+# Keep only directional peaks
+peaks_gr <- peaks_gr[peaks_gr$direction %in% c("up", "down")]
+
+```
+
+```{r}
+# Load 6-column BED of promoters of interest
+genes <- import("all_genes.bed")
+
+# Get strand-aware TSS
+tss <- resize(genes, width = 1, fix = ifelse(strand(genes) == "+", "start", "end"))
+
+tss_window <- resize(tss, width = 2001, fix = "center")
+
+# Find overlaps
+hits <- findOverlaps(peaks_gr, tss_window)
+
+# Add in/out TSS window annotation
+peaks_gr$in_tss_window <- FALSE
+peaks_gr[queryHits(hits)]$in_tss_window <- TRUE
+
+# Convert to data.frame
+peaks_df <- as.data.frame(peaks_gr)
+
+# Count by region and direction
+counts <- dplyr::count(peaks_df, in_tss_window, direction)
+
+# Label regions
+counts$region <- ifelse(counts$in_tss_window, "±1kb of TSS", "Elsewhere")
+```
+
+```{r}
+ggplot(counts, aes(x = region, y = n, fill = direction)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(
+    title = "CTCF Peak Directionality Around TSS",
+    x = "Region",
+    y = "Number of Peaks"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = c("up" = "#1b9e77", "down" = "#d95f02"))
+```
+
+```{r}
+library(GenomicRanges)
+library(rtracklayer)
+
+# Load gene list
+genes <- import("all_genes.bed")
+tss <- resize(genes, width = 1, fix = ifelse(strand(genes) == "+", "start", "end"))
+window <- resize(tss, width = 4001, fix = "center")
+
+# Load CTCF motif sites
+ctcf <- import("ctcfSites.hg38.bed")
+
+# Find overlaps
+hits <- findOverlaps(ctcf, window)
+ctcf_near_genes <- ctcf[queryHits(hits)]
+
+# Export to BED
+export(ctcf_near_genes, "ctcf_near_genes.bed")
+
+
+```
+
+
+```{r}
+# if (!require("BiocManager", quietly = TRUE))
+#     install.packages("BiocManager")
+# 
+# BiocManager::install("CTCF")
+
+BiocManager::install("AnnotationHub", update = FALSE)
+BiocManager::install("GenomicRanges", update = FALSE)
+BiocManager::install("plyranges", update = FALSE)
+```
+
+```{r}
+#library(CTCF)
+library(AnnotationHub)
+
+ah <- AnnotationHub()
+query_data <- subset(ah, preparerclass == "CTCF")
+#query_data
+
+subset(query_data, species == "Homo sapiens" & 
+                   genome == "hg38" & 
+                   dataprovider == "JASPAR 2022")
+
+
+CTCF_hg38 <- query_data[["AH104729"]]
+CTCF_hg38
+nrow(CTCF_hg38)
+
+CTCF_hg38 <- CTCF_hg38 %>% keepStandardChromosomes() %>% sort()
+write.table(CTCF_hg38, file = "CTCF_hg38_JASPAR.bed", sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+

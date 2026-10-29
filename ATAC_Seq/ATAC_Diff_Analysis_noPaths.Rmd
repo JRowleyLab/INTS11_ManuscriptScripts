@@ -1,0 +1,1451 @@
+---
+title: "ATAC_Diff_Analysis"
+author: "Tim Reznicek"
+date: "2025-04-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Libraries
+
+``` {r}
+library(csaw)
+library(edgeR)
+library(rtracklayer)
+
+```
+
+```{bash}
+pwd
+```
+
+``` {r}
+# --- Set up file paths ---
+bam_files <- c(
+  "Nir_CTL_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_CTL_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_CTL_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int1aux_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int1aux_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int1aux_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam"
+)
+
+# Sample group labels
+group <- factor(c("Control", "Control", "Control", "Treatment", "Treatment", "Treatment"))
+
+# --- Create genome windows ---
+# 500 bp sliding windows with 250 bp spacing
+window_params <- windowCounts(bam_files, width=500, spacing=250, ext=150, BPPARAM=BiocParallel::MulticoreParam(4))
+```
+
+``` {r}
+
+# --- Filter low-abundance windows ---
+stats <- filterWindowsGlobal(window_params)
+#table(keep$filter)
+head(stats$filter)
+keep <- stats$filter > log2(3)
+#filtered <- window_params[keep$filter, ]
+#filtered <- window_params[keep$filter, ]
+table(keep)
+filtered <- window_params[keep, ]
+```
+
+``` {r}
+# --- Normalization ---
+# Using TMM normalization from edgeR
+y <- asDGEList(filtered)
+y <- calcNormFactors(y)
+
+# --- Design matrix for differential analysis ---
+design <- model.matrix(~group)
+
+# --- Estimate dispersion and fit model ---
+y <- estimateDisp(y, design)
+fit <- glmQLFit(y, design)
+
+# --- Differential test ---
+res <- glmQLFTest(fit, coef=2)
+```
+
+```{r}
+# --- Output significant results ---
+results_df <- as.data.frame(topTags(res, n=Inf))
+write.csv(results_df, "csaw_differential_results.csv", row.names=FALSE)
+
+# Optional: export as BED
+sig_windows <- results_df[results_df$FDR < 0.05, ]
+sig_regions <- rowRanges(filtered)[rownames(filtered) %in% rownames(sig_windows)]
+head(sig_windows)
+write.csv(sig_windows, "csaw_sigDiff_results.csv", row.names=FALSE)
+rtracklayer::export(sig_regions, "csaw_significant_regions.bed", format="BED")
+```
+
+``` {r}
+#
+
+# adapted from https:6
+
+# load dependencies
+library(ChIPseeker)
+library(csaw)
+library(edgeR)
+library(GenomicRanges)
+library(ggplot2)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+```
+
+``` {r}
+# read peaks files and convert to GRanges
+# CTL Peaks
+AUT.peaks <- read.table("Nir_CTL_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+BUT.peaks <- read.table("Nir_CTL_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+CUT.peaks <- read.table("Nir_CTL_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+colnames(AUT.peaks) <- c("chrom", "start", "end")
+colnames(BUT.peaks) <- c("chrom", "start", "end")
+colnames(CUT.peaks) <- c("chrom", "start", "end")
+AUT.peaks <- GRanges(AUT.peaks)
+BUT.peaks <- GRanges(BUT.peaks)
+CUT.peaks <- GRanges(CUT.peaks)
+UT.peaks <- intersect(intersect(AUT.peaks, BUT.peaks), CUT.peaks)
+
+AINTS11.peaks <- read.table("Nir_Int11aux_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+BINTS11.peaks <- read.table("Nir_Int11aux_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+CINTS11.peaks <- read.table("Nir_Int11aux_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+colnames(AINTS11.peaks) <- c("chrom", "start", "end")
+colnames(BINTS11.peaks) <- c("chrom", "start", "end")
+colnames(CINTS11.peaks) <- c("chrom", "start", "end")
+AINTS11.peaks <- GRanges(AINTS11.peaks)
+BINTS11.peaks <- GRanges(BINTS11.peaks)
+CINTS11.peaks <- GRanges(CINTS11.peaks)
+MINTS11.peaks <- intersect(intersect(AINTS11.peaks, BINTS11.peaks), CINTS11.peaks)
+
+AINTS1.peaks <- read.table("Nir_Int1aux_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+BINTS1.peaks <- read.table("Nir_Int1aux_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+CINTS1.peaks <- read.table("Nir_Int1aux_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.tn5.pval0.01.300K.bfilt.narrowPeak.gz", sep="\t")[,1:3]
+colnames(AINTS1.peaks) <- c("chrom", "start", "end")
+colnames(BINTS1.peaks) <- c("chrom", "start", "end")
+colnames(CINTS1.peaks) <- c("chrom", "start", "end")
+AINTS1.peaks <- GRanges(AINTS1.peaks)
+BINTS1.peaks <- GRanges(BINTS1.peaks)
+CINTS1.peaks <- GRanges(CINTS1.peaks)
+MINTS1.peaks <- intersect(intersect(AINTS1.peaks, BINTS1.peaks), CINTS1.peaks)
+
+all.peaks <- union(union(UT.peaks, MINTS1.peaks), MINTS11.peaks)
+print("Completed")
+```
+
+``` {r}
+# prep blacklist and chromosome restriction
+blacklist <- read.table("hg38-blacklist.v2.bed", sep="\t")
+colnames(blacklist) <- c("chrom", "start", "end")
+blacklist <- GRanges(blacklist)
+standard.chr <- paste0("chr", c(1:19, "X", "Y"))
+param <- readParam(max.frag=1000, pe="both", discard=blacklist, restrict=standard.chr)
+print("Completed")
+```
+
+```{r}
+# load and count reads from bam files
+pe.bams <- c(
+  "Nir_CTL_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_CTL_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_CTL_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int11aux_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int11aux_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int11aux_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int1aux_rep1_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int1aux_rep2_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam",
+  "Nir_Int1aux_rep3_ATAC_CKDL240033405-1A_22V7K3LT3_L4_1.trim.srt.nodup.no_chrM_MT.bam"
+)
+peak.counts <- regionCounts(pe.bams, all.peaks, param=param)
+peak.abundances <- aveLogCPM(asDGEList(peak.counts))
+peak.counts.filt <- peak.counts[peak.abundances > -3, ]
+
+
+# generate window counts (NOTE: MAYBE CHANGE CONSTANT VALUES?)
+counts <- windowCounts(pe.bams, width=300, param=param)
+neighbor <- suppressWarnings(resize(rowRanges(counts), width=2000, fix="center"))
+wider <- regionCounts(pe.bams, regions=neighbor, param=param)
+filter.stat <- filterWindowsLocal(counts, wider)
+counts.local.filt <- counts[filter.stat$filter > log2(3),]
+print("Completed")
+```
+
+```{r}
+# MACS TMM normalization
+binned <- windowCounts(pe.bams, bin=TRUE, width=10000, param=param)
+working.windows <- peak.counts.filt
+working.windows <- normFactors(binned, se.out=working.windows)
+```
+
+```{r}
+# setup design matrix
+y <- asDGEList(working.windows)
+colnames(y$counts) <- c(
+  "AUT", "BUT", "CUT",
+  "AINTS11", "BINTS11", "CINTS11",
+  "AINTS1", "BINTS1", "CINTS1"
+)
+rownames(y$samples) <- c(
+  "AUT", "BUT", "CUT",
+  "AINTS11", "BINTS11", "CINTS11",
+  "AINTS1", "BINTS1", "CINTS1"
+)
+y$samples$group <- c(
+  "UT", "UT", "UT",
+  "MINTS11", "MINTS11", "MINTS11",
+  "MINTS1", "MINTS1", "MINTS1"
+)
+design <- model.matrix(~0+group, data=y$samples)
+print(design)
+colnames(design) <- c("UT", "MINTS11", "MINTS1")
+print("Completed")
+```
+
+```{r}
+# differential accessibility testing
+y <- estimateDisp(y, design)
+fit <- glmFit(y, design)
+lrt <- glmLRT(fit, coef = 2)
+csaw_deg_table <- as.data.frame(topTags(lrt, n = nrow(y), sort.by = 'PValue'))
+csaw_deg_table <- csaw_deg_table %>%
+  dplyr::mutate(gene = rownames(csaw_deg_table),
+                type = ifelse(FDR < 0.05 & abs(logFC) > 1.0, 'significant', 'not significant')) %>%
+  dplyr::select(gene, logFC, logCPM, PValue, FDR, type)
+fig_ma <- csaw_deg_table %>%
+  ggplot(aes(x = logCPM, y = logFC, color = type)) +
+  geom_point() +
+  scale_color_manual(values = c('#666666', '#d62728'))
+print(fig_ma)
+```
+
+```{r}
+
+qlf <- glmQLFit(y, design, robust=TRUE)
+# # MINTS11 v MINTS1
+qlft <- glmQLFTest(qlf, contrast=makeContrasts(MINTS1-MINTS11, levels=design))
+
+
+rowData(working.windows) <- cbind(rowData(working.windows), qlft$table)
+merged.peaks <- mergeWindows(rowRanges(working.windows), tol=500L, max.width=5000L)
+tab.best <- getBestTest(merged.peaks$id, qlft$table)
+final.merged.peaks <- merged.peaks$region
+final.merged.peaks@elementMetadata <- cbind(final.merged.peaks@elementMetadata, tab.best[, -1])
+final.merged.peaks <- final.merged.peaks[order(final.merged.peaks@elementMetadata$FDR), ]
+final.merged.peaks.sig <- final.merged.peaks[final.merged.peaks@elementMetadata$FDR < 0.05, ]
+
+
+# generate plot
+final.merged.peaks$sig <- "n.s"
+final.merged.peaks$sig[final.merged.peaks$FDR < 0.05] <- "significant"
+# ...
+test_df <- as.data.frame(final.merged.peaks)[sample(nrow(as.data.frame(final.merged.peaks)), 15000), ]
+test_df$sig <- "n.s"
+test_df$sig[test_df$FDR < 0.05] <- "significant"
+# ...
+ggplot(data=data.frame(test_df),
+       aes(x = rep.test, y = rep.logFC, col = sig)) +
+    geom_point() + scale_color_manual(values = c("black", "red")) +
+    geom_smooth(inherit.aes = F, aes(x = rep.test, y = rep.logFC), method = "loess") +
+    geom_hline(yintercept = 0) + labs(col = NULL)
+```
+
+```{r}
+
+# differences between G and V annotation
+annotated_final_merged_peaks <- annotatePeak(
+  final.merged.peaks[final.merged.peaks$FDR < 0.05],
+  TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene
+)
+plotAnnoPie(annotated_final_merged_peaks)
+
+annotated_final_merged_peaks_df <- as.data.frame(annotated_final_merged_peaks)
+
+
+# pull promoter peaks
+promoter_de_peaks <- annotated_final_merged_peaks_df[grepl("Promoter", annotated_final_merged_peaks_df$annotation, fixed=TRUE),]
+higher_confidence_promoter_de_peaks <- promoter_de_peaks[promoter_de_peaks$FDR < 0.00001, ]
+head(higher_confidence_promoter_de_peaks[order(higher_confidence_promoter_de_peaks$seqnames, higher_confidence_promoter_de_peaks$start), ])
+MINTS1_biased_promoter_de_peaks <- higher_confidence_promoter_de_peaks[higher_confidence_promoter_de_peaks$direction == "up", ]
+MINTS11_biased_promoter_de_peaks <- higher_confidence_promoter_de_peaks[higher_confidence_promoter_de_peaks$direction == "down", ]
+
+# save promoter peaks to bed
+MINTS1_promoter_bed_df <- data.frame(seqnames=MINTS1_biased_promoter_de_peaks$seqnames,
+                              starts=MINTS1_biased_promoter_de_peaks$start-1,
+                              ends=MINTS1_biased_promoter_de_peaks$end,
+                              names=c(rep(".", length(MINTS1_biased_promoter_de_peaks$strand))),
+                              scores=c(rep(".", length(MINTS1_biased_promoter_de_peaks$strand))),
+                              strands=MINTS1_biased_promoter_de_peaks$strand)
+write.table(
+  MINTS1_promoter_bed_df,
+  file="csaw_edgeR_diff_accessible_MINTS1_biased_peaks_by_promoters.bed",
+  quote=F,
+  sep="\t",
+  row.names=F,
+  col.names=F
+)
+
+MINTS11_promoter_bed_df <- data.frame(seqnames=MINTS11_biased_promoter_de_peaks$seqnames,
+                                     starts=MINTS11_biased_promoter_de_peaks$start-1,
+                                     ends=MINTS11_biased_promoter_de_peaks$end,
+                                     names=c(rep(".", length(MINTS11_biased_promoter_de_peaks$strand))),
+                                     scores=c(rep(".", length(MINTS11_biased_promoter_de_peaks$strand))),
+                                     strands=MINTS11_biased_promoter_de_peaks$strand)
+write.table(
+  MINTS11_promoter_bed_df,
+  file="csaw_edgeR_diff_accessible_MINTS11_biased_peaks_by_promoters.bed",
+  quote=F,
+  sep="\t",
+  row.names=F,
+  col.names=F
+)
+
+
+```
+
+
+Unanswered questions:
+- Diff peaks 1Aux v CTL  
+- Diff peaks 11Aux v CTL  
+- Diff peaks 1Aux v 11Aux  
+ - This may have been answered, but I need to get the df transfer happening  
+- Annotations for the diff peaks in all cases  
+
+
+Differential Comparison to CTL
+```{r}
+# Refit QL model with design
+qlf <- glmQLFit(y, design, robust=TRUE)
+
+# CTL vs MINTS1
+qlft_mints1 <- glmQLFTest(qlf, contrast=makeContrasts(UT - MINTS1, levels=design))
+
+# CTL vs MINTS11
+qlft_mints11 <- glmQLFTest(qlf, contrast=makeContrasts(UT - MINTS11, levels=design))
+
+# MINTS1 vs MINTS11
+qlft_m1vm11 <- glmQLFTest(qlf, contrast=makeContrasts(MINTS1 - MINTS11, levels=design))
+
+```
+
+
+Merge differential windows and get peaks
+```{r}
+# Shared merged windows for consistency
+merged.peaks <- mergeWindows(rowRanges(working.windows), tol=500L, max.width=5000L)
+
+# Get best window in each merged region
+tab_mints1 <- getBestTest(merged.peaks$id, qlft_mints1$table)
+tab_mints11 <- getBestTest(merged.peaks$id, qlft_mints11$table)
+tab_m1vm11 <- getBestTest(merged.peaks$id, qlft_m1vm11$table)
+
+# Attach metadata
+final.merged.peaks_mints1 <- merged.peaks$region
+final.merged.peaks_mints1@elementMetadata <- cbind(final.merged.peaks_mints1@elementMetadata, tab_mints1[, -1])
+final.merged.peaks_mints1 <- final.merged.peaks_mints1[order(final.merged.peaks_mints1$FDR), ]
+
+final.merged.peaks_mints11 <- merged.peaks$region
+final.merged.peaks_mints11@elementMetadata <- cbind(final.merged.peaks_mints11@elementMetadata, tab_mints11[, -1])
+final.merged.peaks_mints11 <- final.merged.peaks_mints11[order(final.merged.peaks_mints11$FDR), ]
+
+final.merged.peaks_m1vm11 <- merged.peaks$region
+final.merged.peaks_m1vm11@elementMetadata <- cbind(final.merged.peaks_m1vm11@elementMetadata, tab_m1vm11[, -1])
+final.merged.peaks_m1vm11 <- final.merged.peaks_m1vm11[order(final.merged.peaks_m1vm11$FDR), ]
+
+```
+
+Annotate Peaks
+```{r}
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# MINTS1 vs CTL
+annot_mints1 <- annotatePeak(final.merged.peaks_mints1[final.merged.peaks_mints1$FDR < 0.05], 
+                             TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+plotAnnoPie(annot_mints1)
+
+# MINTS11 vs CTL
+annot_mints11 <- annotatePeak(final.merged.peaks_mints11[final.merged.peaks_mints11$FDR < 0.05], 
+                              TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+plotAnnoPie(annot_mints11)
+
+# MINTS11 v MINTS1
+annot_m1vm11 <- annotatePeak(final.merged.peaks_m1vm11[final.merged.peaks_m1vm11$FDR < 0.05], 
+                              TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+plotAnnoPie(annot_m1vm11)
+
+```
+
+Save annotated peaks by up/down
+``` {r}
+# Convert to data frames
+df_mints1 <- as.data.frame(annot_mints1)
+df_mints11 <- as.data.frame(annot_mints11)
+df_m1vm11 <- as.data.frame(annot_m1vm11)
+
+# Add significance direction labels
+df_mints1$direction <- ifelse(df_mints1$rep.logFC > 0, "up", "down")
+df_mints11$direction <- ifelse(df_mints11$rep.logFC > 0, "up", "down")
+df_m1vm11$direction <- ifelse(df_m1vm11$rep.logFC > 0, "up", "down")
+
+# Write all significant annotated peaks to file
+write.table(df_mints1, "CTL_vs_MINTS1_annotated_diff_peaks.txt", sep="\t", quote=FALSE, row.names=FALSE)
+write.table(df_mints11, "CTL_vs_MINTS11_annotated_diff_peaks.txt", sep="\t", quote=FALSE, row.names=FALSE)
+write.table(df_m1vm11, "MINTS1_vs_MINTS11_annotated_diff_peaks.txt", sep="\t", quote=FALSE, row.names=FALSE)
+
+```
+
+```{r}
+#############
+# BED files for promoters only
+#############
+
+# Filter promoters
+promoters_mints1 <- df_mints1[grepl("Distal Intergenic", df_mints1$annotation), ]
+promoters_mints11 <- df_mints11[grepl("Distal Intergenic", df_mints11$annotation), ]
+promoters_m1vm11 <- df_m1vm11[grepl("Distal Intergenic", df_m1vm11$annotation), ]
+
+# Split by direction
+mints1_up <- promoters_mints1[promoters_mints1$direction == "up", ]
+mints1_down <- promoters_mints1[promoters_mints1$direction == "down", ]
+mints11_up <- promoters_mints11[promoters_mints11$direction == "up", ]
+mints11_down <- promoters_mints11[promoters_mints11$direction == "down", ]
+m1vm11_up <- promoters_m1vm11[promoters_m1vm11$direction == "up", ]
+m1v11_down <- promoters_m1vm11[promoters_m1vm11$direction == "down", ]
+
+# Make BEDs
+write.table(mints1_up[, c("seqnames", "start", "end")], 
+            "M1_up.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(mints1_down[, c("seqnames", "start", "end")], 
+            "M1_down.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(mints11_up[, c("seqnames", "start", "end")], 
+            "M11_up.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(mints11_down[, c("seqnames", "start", "end")], 
+            "M11_down.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(m1vm11_up[, c("seqnames", "start", "end")], 
+            "M1v11_up.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+write.table(m1v11_down[, c("seqnames", "start", "end")], 
+            "M1v11_down.bed", sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+
+
+
+# Write BEDs
+# write_bed <- function(df, path) {
+#   bed <- data.frame(
+#     seqnames = df$seqnames,
+#     start = df$start - 1,
+#     end = df$end,
+#     name = ".",
+#     score = ".",
+#     strand = df$strand
+#   )
+#   write.table(bed, file=path, sep="\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
+# }
+# 
+# write_bed(mints1_up, "CTL_vs_MINTS1_promoter_up.bed")
+# write_bed(mints1_down, "CTL_vs_MINTS1_promoter_down.bed")
+# write_bed(mints11_up, "CTL_vs_MINTS11_promoter_up.bed")
+# write_bed(mints11_down, "CTL_vs_MINTS11_promoter_down.bed")
+
+```
+
+``` {r}
+############
+# Begin Volcano Plots
+############
+
+# GRanges -> dataframe and annotate
+
+library(dplyr)
+library(ggplot2)
+
+prepare_volcano_df <- function(gr, comparison_name) {
+  df <- as.data.frame(gr)
+  df <- df %>%
+    mutate(gene_type = case_when(
+      rep.logFC >= 1 & FDR <= 0.05 ~ "up",
+      rep.logFC <= -1 & FDR <= 0.05 ~ "down",
+      TRUE ~ "ns"
+    )) %>%
+    mutate(
+      log2FoldChange = rep.logFC,
+      padj = FDR,
+      Comparison = comparison_name
+    )
+  return(df)
+}
+
+# Create data frames
+df_mints1_vs_ctl <- prepare_volcano_df(final.merged.peaks_mints1, "MINTS1 vs CTL")
+df_mints11_vs_ctl <- prepare_volcano_df(final.merged.peaks_mints11, "MINTS11 vs CTL")
+df_mints1_vs_mints11 <- prepare_volcano_df(final.merged.peaks_m1vm11, "MINTS1 vs MINTS11")
+
+
+
+```
+
+``` {r}
+
+##################
+# Volcano plot function
+##################
+
+make_volcano_plot <- function(df, title, outfile) {
+  cols <- c("up" = "red", "down" = "blue", "ns" = "grey")
+  sizes <- c("up" = 2, "down" = 2, "ns" = 1)
+  alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+  p <- ggplot(df, aes(x = log2FoldChange, y = -log10(padj))) +
+    geom_point(aes(fill = gene_type, size = gene_type, alpha = gene_type),
+               shape = 21, colour = "black") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
+    scale_fill_manual(values = cols) +
+    scale_size_manual(values = sizes) +
+    scale_alpha_manual(values = alphas) +
+    coord_cartesian(ylim = c(0, 50), xlim = c(-5, 5)) +
+    labs(title = title,
+         x = "log2(fold change)",
+         y = "-log10(Adjusted P-value)") +
+    theme_classic(base_family = "Arial") +
+    theme(
+      text = element_text(size = 16, family = "Arial", face = "bold"),
+      axis.title = element_text(size = 16),
+      axis.text = element_text(size = 16, face = "bold"),
+      axis.line = element_line(color = "black", size = 1.2),
+      plot.title = element_text(size = 16, face = "bold")
+    )
+
+  ggsave(filename = outfile, plot = p, width = 12, height = 9)
+  return(p)
+}
+
+```
+
+``` {r}
+
+# Run for all three comparisons
+p1 <- make_volcano_plot(df_mints1_vs_ctl,
+                        "ATAC-seq Differential Accessibility: MINTS1 vs CTL",
+                        "volcano_MINTS1_vs_CTL.png")
+
+p2 <- make_volcano_plot(df_mints11_vs_ctl,
+                        "ATAC-seq Differential Accessibility: MINTS11 vs CTL",
+                        "volcano_MINTS11_vs_CTL.png")
+
+p3 <- make_volcano_plot(df_mints1_vs_mints11,
+                        "ATAC-seq Differential Accessibility: MINTS1 vs MINTS11",
+                        "volcano_MINTS1_vs_MINTS11.png")
+
+
+```
+
+``` {r}
+#########
+# How many significant changes are present in global peaks?
+#########
+
+# MINTS1
+df_mints1_vs_ctl <- df_mints1_vs_ctl %>%
+  mutate(
+    direction = ifelse(rep.logFC > 0, "up", "down"),
+    sig_status = ifelse(FDR <= 0.05, "significant", "not_significant")
+  )
+
+# MINTS11
+df_mints11_vs_ctl <- df_mints11_vs_ctl %>%
+  mutate(
+    direction = ifelse(rep.logFC > 0, "up", "down"),
+    sig_status = ifelse(FDR <= 0.05, "significant", "not_significant")
+  )
+
+# MINTS1v11
+df_mints1_vs_mints11 <- df_mints1_vs_mints11 %>%
+  mutate(
+    direction = ifelse(rep.logFC > 0, "up", "down"),
+    sig_status = ifelse(FDR <= 0.05, "significant", "not_significant")
+  )
+
+```
+
+``` {r}
+# Count by direction and significance
+mints1_counts <- df_mints1_vs_ctl %>%
+  filter(sig_status == "significant") %>%
+  group_by(direction) %>%
+  summarise(count = n(), .groups = "drop")
+
+mints11_counts <- df_mints11_vs_ctl %>%
+  filter(sig_status == "significant") %>%
+  group_by(direction) %>%
+  summarise(count = n(), .groups = "drop")
+
+m1vm11_counts <- df_mints1_vs_mints11 %>%
+  filter(sig_status == "significant") %>%
+  group_by(direction) %>%
+  summarise(count = n(), .groups = "drop")
+
+print("MINTS1 vs CTL promoter peak direction counts:")
+print(mints1_counts)
+
+print("MINTS11 vs CTL promoter peak direction counts:")
+print(mints11_counts)
+
+print("MINTS1 vs MINTS11 promoter peak direction counts:")
+print(m1vm11_counts)
+
+```
+
+
+``` {r}
+#########
+# How many significant changes are present at promoters?
+#########
+
+# MINTS1
+promoters_mints1 <- promoters_mints1 %>%
+  mutate(
+    direction = ifelse(rep.logFC > 0, "up", "down"),
+    sig_status = ifelse(FDR <= 0.05, "significant", "not_significant")
+  )
+
+# MINTS11
+promoters_mints11 <- promoters_mints11 %>%
+  mutate(
+    direction = ifelse(rep.logFC > 0, "up", "down"),
+    sig_status = ifelse(FDR <= 0.05, "significant", "not_significant")
+  )
+
+# MINTS1v11
+promoters_m1vm11 <- promoters_m1vm11 %>%
+  mutate(
+    direction = ifelse(rep.logFC > 0, "up", "down"),
+    sig_status = ifelse(FDR <= 0.05, "significant", "not_significant")
+  )
+
+```
+
+``` {r}
+# Count by direction and significance
+mints1_counts <- promoters_mints1 %>%
+  filter(sig_status == "significant") %>%
+  group_by(direction) %>%
+  summarise(count = n(), .groups = "drop")
+
+mints11_counts <- promoters_mints11 %>%
+  filter(sig_status == "significant") %>%
+  group_by(direction) %>%
+  summarise(count = n(), .groups = "drop")
+
+m1vm11_counts <- promoters_m1vm11 %>%
+  filter(sig_status == "significant") %>%
+  group_by(direction) %>%
+  summarise(count = n(), .groups = "drop")
+
+print("MINTS1 vs CTL promoter peak direction counts:")
+print(mints1_counts)
+
+print("MINTS11 vs CTL promoter peak direction counts:")
+print(mints11_counts)
+
+print("MINTS1 vs MINTS11 promoter peak direction counts:")
+print(m1vm11_counts)
+
+```
+
+```{r}
+###########
+# Motif Summarization
+###########
+
+library(readr)
+m1_up_motifs <- read_delim("knownResults.txt", delim="\t")
+m1_up_motifs %>% dplyr::select(MotifName, Pvalue, qvalue, TargetSequences, BackgroundSequences)
+
+m1_down_motifs <- read_delim("knownResults.txt", delim="\t")
+m1_down_motifs %>% dplyr::select(MotifName, Pvalue, qvalue, TargetSequences, BackgroundSequences)
+
+```
+
+``` {r}
+#################
+# Distribution of peak sizes between samples
+#################
+
+library(GenomicRanges)
+library(dplyr)
+library(ggplot2)
+
+# Step 1: Convert GRanges to data frames with peak size
+df_UT <- as.data.frame(UT.peaks) %>%
+  mutate(peak_size = width, group = "CTL")
+
+df_MINTS1 <- as.data.frame(MINTS1.peaks) %>%
+  mutate(peak_size = width, group = "MINTS1")
+
+df_MINTS11 <- as.data.frame(MINTS11.peaks) %>%
+  mutate(peak_size = width, group = "MINTS11")
+
+# Step 2: Combine all into one data frame
+df_all <- bind_rows(df_UT, df_MINTS1, df_MINTS11)
+
+# Step 3: Optional filter to remove long tail (e.g., >5kb peaks)
+df_all <- df_all %>% filter(peak_size < 5000)
+
+cb_colors <- c("CTL" = "#E69F00", "MINTS1" = "#56B4E9", "MINTS11" = "#009E73")
+
+# Step 4: Plot density plot of peak sizes
+ggplot(df_all, aes(x = peak_size, fill = group, color = group)) +
+  geom_density(alpha = 0.3, linewidth = 1.2) +
+  scale_fill_manual(values = cb_colors) +
+  scale_color_manual(values = cb_colors) +
+  coord_cartesian(xlim = c(0, 2000)) +
+  labs(
+    title = "Peak Size Distributions Across Conditions",
+    x = "Peak Size (bp)",
+    y = "Density"
+  ) +
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 14),
+    legend.title = element_blank()
+  )
+
+
+```
+
+``` {r}
+########
+# Violin
+########
+
+
+# Colorblind-friendly palette
+cb_colors <- c("CTL" = "#E69F00", "MINTS1" = "#56B4E9", "MINTS11" = "#009E73")
+
+# Filter for better visualization (optional, adjust if needed)
+df_filtered <- df_all %>% filter(peak_size <= 1000)
+
+# Violin plot with median
+ggplot(df_filtered, aes(x = group, y = peak_size, fill = group)) +
+  geom_violin(trim = FALSE, scale = "width", color = "black") +
+  stat_summary(fun = median, geom = "point", shape = 23, size = 3, fill = "white", color = "black") +
+  scale_fill_manual(values = cb_colors) +
+  labs(
+    title = "Distribution of Peak Sizes by Condition",
+    x = "Group",
+    y = "Peak Size (bp)"
+  ) +
+  theme_classic(base_family = "Arial") +
+  theme(
+    text = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 14),
+    legend.position = "none"
+  )
+
+
+
+```
+
+```{r}
+print(median(df_UT$peak_size))
+print(median(df_MINTS1$peak_size))
+print(median(df_MINTS11$peak_size))
+```
+
+``` {r}
+################
+# Distance to TSS of peaks
+################
+library(GenomicRanges)
+library(dplyr)
+
+# Read gene BED file (assume 6 columns: chr, start, end, name, ., strand)
+genes_df <- read.table("all_genes.bed", sep="\t", header=FALSE,
+                       col.names = c("chr", "start", "end", "name", "placeholder", "strand"))
+
+# Determine TSS based on strand
+genes_df <- genes_df %>%
+  mutate(TSS = ifelse(strand == "+", start, end))  # + uses start, - uses end
+
+# Convert to GRanges
+genes_gr <- GRanges(
+  seqnames = genes_df$chr,
+  ranges = IRanges(start = genes_df$TSS, end = genes_df$TSS),  # TSS as point
+  strand = genes_df$strand,
+  gene = genes_df$name
+)
+
+
+```
+
+``` {r}
+# Peak center adjustment
+ctl_center_gr <- resize(UT.peaks, width = 1, fix = "center")
+mints1_center_gr <- resize(MINTS1.peaks, width = 1, fix = "center")
+mints11_center_gr <- resize(MINTS11.peaks, width = 1, fix = "center")
+```
+
+``` {r}
+# Distance to nearest TSS
+ctl_dist <- distanceToNearest(ctl_center_gr, genes_gr)
+mints1_dist <- distanceToNearest(mints1_center_gr, genes_gr)
+mints11_dist <- distanceToNearest(mints11_center_gr, genes_gr)
+```
+
+``` {r}
+# Extract distances and labels
+df_ctl <- data.frame(distance = mcols(ctl_dist)$distance, group = "CTL")
+df_mints1 <- data.frame(distance = mcols(mints1_dist)$distance, group = "MINTS1")
+df_mints11 <- data.frame(distance = mcols(mints11_dist)$distance, group = "MINTS11")
+
+# Combine and filter to ±5kb
+all_dists <- bind_rows(df_ctl, df_mints1, df_mints11) %>%
+  filter(distance <= 5000)
+```
+
+```{r}
+cb_colors <- c("CTL" = "#E69F00", "MINTS1" = "#56B4E9", "MINTS11" = "#009E73")
+
+ggplot(all_dists, aes(x = distance, fill = group, color = group)) +
+  geom_density(alpha = 0.3, linewidth = 1.2) +
+  scale_fill_manual(values = cb_colors) +
+  scale_color_manual(values = cb_colors) +
+  coord_cartesian(xlim = c(0, 3000)) +
+  labs(
+    title = "Distance of Peaks to Nearest TSS",
+    x = "Distance to TSS (bp)",
+    y = "Density"
+  ) +
+  theme_classic() +
+  theme(
+    text = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 14),
+    legend.title = element_blank()
+  )
+
+```
+
+```{r}
+# Annotations on HiC anchors:
+library(ggplot2)
+library(ggrepel)
+
+# Read the ONLY.tsv file
+df <- read.table("rightAnch_UpPeak_OverlapFull_ONLY.tsv", sep = "\t", header = FALSE, quote = "", stringsAsFactors = FALSE)
+head(df[, 7])
+```
+
+```{r Pie-chart}
+# Extract and clean annotation column (column 7)
+annotations <- df[, 7]
+annotations_clean <- gsub("\\s*\\(.*?\\)", "", annotations)
+
+# Count frequency
+annotation_counts <- as.data.frame(table(annotations_clean))
+colnames(annotation_counts) <- c("Annotation", "Count")
+
+# Calculate percentages and legend label
+annotation_counts$Fraction <- annotation_counts$Count / sum(annotation_counts$Count)
+annotation_counts$LegendLabel <- paste0(annotation_counts$Annotation, " (", 
+                                        round(annotation_counts$Fraction * 100, 2), "%)")
+
+# Reorder factor to match pie slice order
+annotation_counts$LegendLabel <- factor(annotation_counts$LegendLabel,
+                                        levels = annotation_counts$LegendLabel)
+
+# Plot pie chart with clean slices and detailed legend
+ggplot(annotation_counts, aes(x = "", y = Count, fill = LegendLabel)) +
+  geom_col(width = 1, color = "white") +
+  coord_polar(theta = "y") +
+  theme_void() +
+  theme(legend.title = element_blank(),
+        legend.text = element_text(size = 12))
+```
+
+``` {r Simple-bar}
+library(ggplot2)
+
+# Read the ONLY.tsv file
+df <- read.table("rightAnch_UpPeak_OverlapFull_ONLY.tsv", 
+                 sep = "\t", header = FALSE, quote = "", stringsAsFactors = FALSE)
+
+# Extract and clean annotation column (column 7)
+annotations <- df[, 8]
+annotations_clean <- gsub("\\s*\\(.*?\\)", "", annotations)
+
+# Count frequency
+annotation_counts <- as.data.frame(table(annotations_clean))
+colnames(annotation_counts) <- c("Annotation", "Count")
+
+# Reorder bars by count descending (optional)
+annotation_counts$Annotation <- factor(annotation_counts$Annotation,
+                                       levels = annotation_counts$Annotation[order(annotation_counts$Count, decreasing = TRUE)])
+
+# Plot bar chart
+p <- ggplot(annotation_counts, aes(x = Annotation, y = Count, fill = Annotation)) +
+  geom_bar(stat = "identity", width = 0.7, color = "black") +
+  theme_minimal() +
+  labs(title = "Anchor Annotation Distribution",
+       x = "Annotation",
+       y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none",
+        text = element_text(size = 14))
+
+p
+ggsave("annotationRightAnchOnly_bar_chart.png", plot = p, width = 15, height = 12, dpi = 300)
+
+```
+
+
+```{r Euler}
+library(eulerr)
+
+# Read file (assuming tab-separated, quote-safe)
+df <- read.table("union.tsv", sep = "\t", header = FALSE, quote = "", stringsAsFactors = FALSE)
+
+# Extract annotations from columns 5 and 9
+annot1 <- gsub("\\s*\\(.*?\\)", "", df[, 5])  # Clean anchor 1 annotations
+annot2 <- gsub("\\s*\\(.*?\\)", "", df[, 9])  # Clean anchor 2 annotations
+
+# Create counts for all combinations
+combo_counts <- as.data.frame(table(annot1, annot2))
+
+# Remove zero-count combinations
+combo_counts <- subset(combo_counts, Freq > 0)
+
+# Initialize empty named vector
+euler_input <- c()
+
+for (i in 1:nrow(combo_counts)) {
+  a1 <- combo_counts$annot1[i]
+  a2 <- combo_counts$annot2[i]
+  freq <- combo_counts$Freq[i]
+  
+  if (a1 == a2) {
+    # Single-annotation set
+    if (!paste0(a1) %in% names(euler_input)) {
+      euler_input[paste0(a1)] <- 0
+    }
+    euler_input[paste0(a1)] <- euler_input[paste0(a1)] + freq
+  } else {
+    # Overlap between two annotations
+    overlap_name <- paste(sort(c(a1, a2)), collapse = "&")  # Sorted ensures A&B == B&A
+    if (!overlap_name %in% names(euler_input)) {
+      euler_input[overlap_name] <- 0
+    }
+    euler_input[overlap_name] <- euler_input[overlap_name] + freq
+  }
+}
+
+# Handle NA-initialized values
+euler_input[is.na(euler_input)] <- 0
+
+# Plot Euler diagram
+fit <- euler(euler_input)
+p <- plot(fit,
+     quantities = TRUE,
+     #fills = list(fill = "cornflowerblue", alpha = 0.5),
+     labels = list(font = 2),
+     legend = list(title = "Annotation Type"))
+
+ggsave("annotationUnion_pie_chart.png", plot = p, width = 15, height = 12, dpi = 300)
+
+```
+
+```{r Upset-plot, message=FALSE, warning=FALSE}
+
+library(ComplexUpset)
+library(dplyr)
+library(readr)
+library(stringr)
+
+# Load union file
+df <- read_tsv("Ints1_v_Ctl_up1.tsv", col_names = FALSE)
+
+# Columns:
+# V1: ID
+# V5: annotation from file1
+# V9: annotation from file2
+
+# Clean annotations (remove anything in parentheses)
+df <- df %>%
+  mutate(annotation1 = str_replace_all(X9, "\\s*\\(.*?\\)", ""),
+         annotation2 = str_replace_all(X16, "\\s*\\(.*?\\)", ""))
+
+# Get unique annotations across both columns
+all_annots <- unique(c(df$annotation1, df$annotation2))
+
+# Create binary columns for each annotation
+for (annot in all_annots) {
+  df[[annot]] <- as.integer(df$annotation1 == annot | df$annotation2 == annot)
+}
+
+# Keep ID + annotation binary columns
+upset_df <- df %>%
+  dplyr::select(ID = X1, dplyr::all_of(all_annots))
+
+# Plot UpSet with ComplexUpset
+p <- upset(
+  upset_df,
+  intersect = all_annots,
+  name = "Anchor Pair Annotation Intersections",
+  base_annotations = list(
+    'Intersection size' = intersection_size(
+      text = list(vjust = -0.5),
+      bar_width = 0.8
+    )
+    + ylim(c(0, 1350))
+  ),
+  width_ratio = 0.1
+)
+
+ggsave("Ints1_v_Ctl_up1_upset_chart.png", plot = p, width = 15, height = 12, dpi = 300)
+```
+
+
+``` {eval=FALSE}
+# Now doing TOBIAS...I want to start with just the differential peaks:
+
+# INTS1 differential files:
+# differential peak BED: CtlVs1_upPeaks_filt.bed
+# BAM: INTS1_AID.merged.nodup.sorted.bam
+# reference genome: ~hg38.fa (mapped with encode so needs to be encode) ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta
+
+# filtered out some weird peaks at the end of the chromosomes from csaw output:
+awk '$2 != $3' diff_peaks.bed > diff_peaks_filtered.bed
+
+# Run tobias ATACorrect:
+TOBIAS ATACorrect \
+    --bam INTS1_AID.merged.nodup.sorted.bam \
+    --genome ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta \
+    --peaks CtlVs1_upPeaks_filt.bed \
+    --outdir Corrected_Output \
+    --cores 23
+
+# Get control as well
+TOBIAS ATACorrect \
+    --bam CTL.merged.nodup.sorted.bam \
+    --genome ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta \
+    --peaks CtlVs1_upPeaks_filt.bed \
+    --outdir Corrected_Output \
+    --cores 23
+
+TOBIAS FootprintScores \
+    --signal Corrected_Output/INTS1_AID.merged.nodup.sorted_corrected.bw \
+    --regions CtlVs1_upPeaks_filt.bed \
+    --output treatment_scores.bw
+
+TOBIAS FootprintScores \
+    --signal Corrected_Output/CTL.merged.nodup.sorted_corrected.bw \
+    --regions CtlVs1_upPeaks_filt.bed \
+    --output control_scores.bw
+
+TOBIAS BINDetect \
+    --motifs JASPAR2024_CORE_vertebrates_non-redundant_pfms_jaspar.txt \
+    --signals treatment_scores.bw control_scores.bw \
+    --genome ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta \
+    --peaks CtlVs11_upPeaks_filt.bed \
+    --cond_names INTS1+Aux Control \
+    --outdir bindetect_output \
+    --cores 23
+
+# INTS11 diff files
+# differential peak BED: CtlVs1_upPeaks_filt.bed
+# BAM: INTS11_AID.merged.nodup.sorted.bam
+# reference genome: ~hg38.fa (mapped with encode so needs to be encode) ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta
+TOBIAS ATACorrect \
+    --bam INTS11_AID.merged.nodup.sorted.bam \
+    --genome ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta \
+    --peaks CtlVs11_upPeaks_filt.bed \
+    --outdir Corrected_Output \
+    --cores 23
+
+# Get control as well
+TOBIAS ATACorrect \
+    --bam CTL.merged.nodup.sorted.bam \
+    --genome ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta \
+    --peaks CtlVs11_upPeaks_filt.bed \
+    --outdir Corrected_Output \
+    --cores 23
+
+TOBIAS FootprintScores \
+    --signal Corrected_Output/INTS11_AID.merged.nodup.sorted_corrected.bw \
+    --regions CtlVs11_upPeaks_filt.bed \
+    --output treatment_scores.bw
+
+TOBIAS FootprintScores \
+    --signal Corrected_Output/CTL.merged.nodup.sorted_corrected.bw \
+    --regions CtlVs11_upPeaks_filt.bed \
+    --output control_scores.bw
+
+TOBIAS BINDetect \
+    --motifs JASPAR2024_CORE_vertebrates_non-redundant_pfms_jaspar.txt \
+    --signals treatment_scores.bw control_scores.bw \
+    --genome ~GRCh38_no_alt_analysis_set_GCA_000001405.15.fasta \
+    --peaks CtlVs11_upPeaks_filt.bed \
+    --cond_names INTS11+Aux Control \
+    --outdir bindetect_output \
+    --cores 23
+
+```
+
+
+
+BINDetect results volcano plots
+``` {r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(ggrepel)
+
+# Load bindetect results
+bindetect1 <- read_tsv("bindetect_results.txt", col_names = FALSE, skip = 1)
+bindetect2 <- read_tsv("bindetect_results.txt", col_names = FALSE, skip = 1)
+
+# Rename relevant columns
+colnames(bindetect1)[c(2, 10, 11)] <- c("TF", "log2FoldChange", "padj")
+colnames(bindetect2)[c(2, 10, 11)] <- c("TF", "log2FoldChange", "padj")
+
+# Add gene_type column based on thresholds
+prepare_volcano_data <- function(df) {
+  df <- as.data.frame(df)  # convert to base data.frame
+  df %>%
+    mutate(
+      padj = as.numeric(padj),
+      log2FoldChange = as.numeric(log2FoldChange),
+      gene_type = case_when(
+        padj < 0.05 & log2FoldChange > 0.4 ~ "up",
+        padj < 0.05 & log2FoldChange < -0.4 ~ "down",
+        TRUE ~ "ns"
+      ),
+      log_padj = -log10(padj)
+    )
+}
+
+df1 <- prepare_volcano_data(bindetect1)
+df2 <- prepare_volcano_data(bindetect2)
+
+df1
+df2
+
+```
+
+```{r}
+
+make_volcano_plot <- function(df, title, outfile, label_tfs = NULL) {
+  cols <- c("up" = "red", "down" = "blue", "ns" = "grey")
+  sizes <- c("up" = 2, "down" = 2, "ns" = 1)
+  alphas <- c("up" = 1, "down" = 1, "ns" = 0.5)
+
+  # Optional: extract just the TFs you want to label
+  label_df <- df %>% filter(TF %in% label_tfs)
+
+  p <- ggplot(df, aes(x = log2FoldChange, y = -log10(padj))) +
+    geom_point(aes(fill = gene_type, size = gene_type, alpha = gene_type),
+               shape = 21, colour = "black") +
+    geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
+    geom_vline(xintercept = c(-0.4, 0.4), linetype = "dashed") +
+    scale_fill_manual(values = cols) +
+    scale_size_manual(values = sizes) +
+    scale_alpha_manual(values = alphas) +
+    geom_text_repel(data = label_df, aes(label = TF),
+                    max.overlaps = Inf,
+                    size = 4,
+                    fontface = "bold") +
+    coord_cartesian(ylim = c(0, 250), xlim = c(-0.75, 0.75)) +
+    labs(title = title,
+         x = "log2(fold change)",
+         y = "-log10(Adjusted P-value)") +
+    theme_classic(base_family = "Arial") +
+    theme(
+      text = element_text(size = 16, face = "bold"),
+      axis.title = element_text(size = 16),
+      axis.text = element_text(size = 16, face = "bold"),
+      axis.line = element_line(color = "black", size = 1.2),
+      plot.title = element_text(size = 16, face = "bold")
+    )
+
+  ggsave(filename = outfile, plot = p, width = 12, height = 9)
+  return(p)
+}
+
+```
+
+```{r}
+# Vector of TFs to label
+highlight_tfs <- c("CTCF", "JDP2", "FOSB::JUNB", "FOSL2::JUND", "FOSL2::JUNB", "FOSL2::JUN", "FOS::JUNB", "FOS::JUN", "FOS",
+                   "Jun", "BACH2", "NFE2", "BACH1", "SP4", "SP3", "KLF16", "CTCFL", "NFYC", "NFYA", "FOXE1", "FOSL2", "CDX4",
+                   "FOXC1", "CDX1", "HOXA10")
+
+p1 <- make_volcano_plot(df1,
+                        "TF Binding Changes: INTS1+Aux",
+                        "volcano_1Aux.png",
+                        label_tfs = highlight_tfs)
+
+p2 <- make_volcano_plot(df2,
+                        "TF Binding Changes: INTS11+Aux",
+                        "volcano_11Aux.png",
+                        label_tfs = highlight_tfs)
+
+```
+
+
+```{r}
+str(df1)
+
+```
+
+
+
+```{r}
+######################
+# Single anchor overlap on the left anchor, to get the right anchor overlap
+######################
+
+
+library(dplyr)
+library(readr)
+library(GenomicRanges)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+### -----------------------------
+### USER INPUT
+### -----------------------------
+atac_peaks_file <- "overlap.optimal_peak.narrowPeak.gz"         # gzipped ATAC peaks file
+fithic_file <- "Ints1_v_Ctl_leftAnchATACOverlap_ONLY.tsv"   # Fithic left-anchor overlap file
+output_overlap <- "Ints1_v_Ctl_leftAnchDiffATAC_rightNonDiff.tsv"
+output_no_overlap <- "Ints1_v_Ctl_leftAnchDiffATAC_NORIGHT.tsv"
+bin_size <- 2000  # Bin size for Fithic anchors
+
+### -----------------------------
+### STEP 1: READ ATAC PEAKS (with annotation)
+### -----------------------------
+atac_peaks <- readr::read_tsv(atac_peaks_file, col_names = FALSE) %>%
+  dplyr::select(1:4) %>%  # Keep first 4 columns (chrom, start, end, peak_name)
+  dplyr::rename(chrom = X1, start = X2, end = X3, peak_name = X4)
+
+# Convert to GRanges with annotation
+atac_gr <- GenomicRanges::GRanges(
+  seqnames = atac_peaks$chrom,
+  ranges = IRanges::IRanges(start = atac_peaks$start, end = atac_peaks$end),
+  peak_name = atac_peaks$peak_name
+)
+
+### -----------------------------
+### STEP 2: READ FITHIC ANCHOR OVERLAP FILE
+### -----------------------------
+fithic_df <- readr::read_tsv(fithic_file, col_names = FALSE)
+# ADJUSTED FOR THE FC COLUMN
+colnames(fithic_df) <- c("combined", "chr1", "start1", "end1", "l2fc", "chr2", "start2", "end2", "annotation")
+
+### -----------------------------
+### STEP 3: EXTRACT TRUE RIGHT ANCHOR FROM `combined`
+### -----------------------------
+split_vals <- strsplit(fithic_df$combined, "_")
+
+# Extract chromosome, left anchor start, right anchor start
+chrom_val <- sapply(split_vals, `[`, 1)
+right_val <- as.numeric(sapply(split_vals, `[`, 3))     # Grabbing the right anchor
+
+# Add correct right anchor info
+fithic_df <- fithic_df %>%
+  dplyr::mutate(
+    chrom_right = paste0("chr", chrom_val),
+    right_anchor_start = right_val,
+    right_anchor_end = right_val + bin_size
+  )
+
+### -----------------------------
+### STEP 4: CONVERT RIGHT ANCHOR TO GRanges
+### -----------------------------
+right_anchor_gr <- GenomicRanges::GRanges(
+  seqnames = fithic_df$chrom_right,
+  ranges = IRanges::IRanges(start = fithic_df$right_anchor_start,
+                            end = fithic_df$right_anchor_end)
+)
+
+### -----------------------------
+### STEP 5: FIND OVERLAPS AND ADD ANNOTATION
+### -----------------------------
+hits <- GenomicRanges::findOverlaps(right_anchor_gr, atac_gr)
+
+# Combine overlaps into data frame
+overlap_df <- fithic_df[S4Vectors::queryHits(hits), ] %>%
+  dplyr::mutate(
+    overlap_peak_coord = paste0(GenomeInfoDb::seqnames(atac_gr)[S4Vectors::subjectHits(hits)], ":",
+                                IRanges::start(atac_gr)[S4Vectors::subjectHits(hits)], "-",
+                                IRanges::end(atac_gr)[S4Vectors::subjectHits(hits)]),
+    overlap_peak_name = mcols(atac_gr)$peak_name[S4Vectors::subjectHits(hits)],
+    overlap_annotation = "ATAC_peak_overlap"
+  )
+
+# Convert overlapping ATAC peaks into GRanges
+overlap_atac_gr <- GenomicRanges::GRanges(
+  seqnames = GenomeInfoDb::seqnames(atac_gr)[S4Vectors::subjectHits(hits)],
+  ranges = IRanges::IRanges(start = IRanges::start(atac_gr)[S4Vectors::subjectHits(hits)],
+                            end = IRanges::end(atac_gr)[S4Vectors::subjectHits(hits)])
+)
+
+# Annotate with genomic feature using ChIPseeker
+annot_res <- ChIPseeker::annotatePeak(overlap_atac_gr, TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# Convert annotation to data frame
+annot_df <- as.data.frame(annot_res)
+
+# Extract annotation info
+annotation_labels <- annot_df$annotation
+
+# Add annotation to overlap_df
+overlap_df$genomic_annotation <- annotation_labels
+
+# Anchors without overlaps
+no_overlap_idx <- setdiff(seq_len(nrow(fithic_df)), S4Vectors::queryHits(hits))
+no_overlap_df <- fithic_df[no_overlap_idx, ]
+
+### -----------------------------
+### STEP 6: SAVE OUTPUT
+### -----------------------------
+readr::write_tsv(overlap_df, output_overlap)
+readr::write_tsv(no_overlap_df, output_no_overlap)
+
+cat("✅ Overlap analysis complete!\n")
+cat("Anchors with overlap: ", nrow(overlap_df), "\n")
+cat("Anchors without overlap: ", nrow(no_overlap_df), "\n")
+cat("Results saved to:\n", output_overlap, "\n", output_no_overlap, "\n")
+
+```
+
+
+
+```{r}
+######################
+# Single anchor overlap on the right anchor, to add the left anchor
+######################
+
+library(dplyr)
+library(readr)
+library(GenomicRanges)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+### -----------------------------
+### USER INPUT
+### -----------------------------
+atac_peaks_file <- "overlap.optimal_peak.narrowPeak.gz"         # gzipped ATAC peaks file  
+fithic_file <- "Ints1_v_Ctl_rightAnchATACOverlap_ONLY.tsv"   # Fithic right-anchor overlap file  
+output_overlap <- "Ints1_v_Ctl_rightAnchDiffATAC_leftNonDiff.tsv"
+output_no_overlap <- "Ints1_v_Ctl_rightAnchDiffATAC_NOLEFT.tsv"
+bin_size <- 2000  # Bin size for Fithic anchors
+
+### -----------------------------
+### STEP 1: READ ATAC PEAKS (with annotation)
+### -----------------------------
+atac_peaks <- readr::read_tsv(atac_peaks_file, col_names = FALSE) %>%
+  dplyr::select(1:4) %>%  # Keep first 4 columns (chrom, start, end, peak_name)
+  dplyr::rename(chrom = X1, start = X2, end = X3, peak_name = X4)
+
+# Convert to GRanges with annotation
+atac_gr <- GenomicRanges::GRanges(
+  seqnames = atac_peaks$chrom,
+  ranges = IRanges::IRanges(start = atac_peaks$start, end = atac_peaks$end),
+  peak_name = atac_peaks$peak_name
+)
+
+### -----------------------------
+### STEP 2: READ FITHIC ANCHOR OVERLAP FILE
+### -----------------------------
+fithic_df <- readr::read_tsv(fithic_file, col_names = FALSE)
+#  ADJUSTED FOR FC COLUMN
+colnames(fithic_df) <- c("combined", "chr1", "start1", "end1", "l2fc", "chr2", "start2", "end2", "annotation")
+
+### -----------------------------
+### STEP 3: EXTRACT TRUE LEFT ANCHOR FROM `combined`
+### -----------------------------
+split_vals <- strsplit(fithic_df$combined, "_")
+
+# Extract chromosome, left anchor start, right anchor start
+chrom_val <- sapply(split_vals, `[`, 1)
+right_val <- as.numeric(sapply(split_vals, `[`, 2))    # Grabbing the left anchor
+
+# Add correct right anchor info
+fithic_df <- fithic_df %>%
+  dplyr::mutate(
+    chrom_right = paste0("chr", chrom_val),
+    right_anchor_start = right_val,
+    right_anchor_end = right_val + bin_size
+  )
+
+### -----------------------------
+### STEP 4: CONVERT RIGHT ANCHOR TO GRanges
+### -----------------------------
+right_anchor_gr <- GenomicRanges::GRanges(
+  seqnames = fithic_df$chrom_right,
+  ranges = IRanges::IRanges(start = fithic_df$right_anchor_start,
+                            end = fithic_df$right_anchor_end)
+)
+
+### -----------------------------
+### STEP 5: FIND OVERLAPS AND ADD ANNOTATION
+### -----------------------------
+hits <- GenomicRanges::findOverlaps(right_anchor_gr, atac_gr)
+
+# Combine overlaps into data frame
+overlap_df <- fithic_df[S4Vectors::queryHits(hits), ] %>%
+  dplyr::mutate(
+    overlap_peak_coord = paste0(GenomeInfoDb::seqnames(atac_gr)[S4Vectors::subjectHits(hits)], ":",
+                                IRanges::start(atac_gr)[S4Vectors::subjectHits(hits)], "-",
+                                IRanges::end(atac_gr)[S4Vectors::subjectHits(hits)]),
+    overlap_peak_name = mcols(atac_gr)$peak_name[S4Vectors::subjectHits(hits)],
+    overlap_annotation = "ATAC_peak_overlap"
+  )
+
+# Convert overlapping ATAC peaks into GRanges
+overlap_atac_gr <- GenomicRanges::GRanges(
+  seqnames = GenomeInfoDb::seqnames(atac_gr)[S4Vectors::subjectHits(hits)],
+  ranges = IRanges::IRanges(start = IRanges::start(atac_gr)[S4Vectors::subjectHits(hits)],
+                            end = IRanges::end(atac_gr)[S4Vectors::subjectHits(hits)])
+)
+
+# Annotate with genomic feature using ChIPseeker
+annot_res <- ChIPseeker::annotatePeak(overlap_atac_gr, TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+
+# Convert annotation to data frame
+annot_df <- as.data.frame(annot_res)
+
+# Extract annotation info
+annotation_labels <- annot_df$annotation
+
+# Add annotation to overlap_df
+overlap_df$genomic_annotation <- annotation_labels
+
+# Anchors without overlaps
+no_overlap_idx <- setdiff(seq_len(nrow(fithic_df)), S4Vectors::queryHits(hits))
+no_overlap_df <- fithic_df[no_overlap_idx, ]
+
+### -----------------------------
+### STEP 6: SAVE OUTPUT
+### -----------------------------
+readr::write_tsv(overlap_df, output_overlap)
+readr::write_tsv(no_overlap_df, output_no_overlap)
+
+cat("✅ Overlap analysis complete!\n")
+cat("Anchors with overlap: ", nrow(overlap_df), "\n")
+cat("Anchors without overlap: ", nrow(no_overlap_df), "\n")
+cat("Results saved to:\n", output_overlap, "\n", output_no_overlap, "\n")
+
+```
+
+
+
