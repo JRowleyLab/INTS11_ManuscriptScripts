@@ -1,0 +1,5 @@
+# Demo run outputs (reference copies live in demo/expected_output/)
+demo/output/
+
+# Full-size manuscript input: too large for git (~205 MB)
+TT_Seq/log2_int11pvsint1m.bw

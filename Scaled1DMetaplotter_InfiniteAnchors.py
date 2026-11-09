@@ -10,7 +10,7 @@ import seaborn as sns
 parser = argparse.ArgumentParser(description='Tool used to create scaled 1D metaplots (similar to Scaled2DMetaplotter)\n\n', formatter_class=argparse.RawTextHelpFormatter)
 parser.add_argument("-i", "--bwfile", dest="bw_file", help="Input .bw file\n\n", metavar="bw_file", required=True)
 parser.add_argument("-a", "--anchorfile", dest="anchor_file", help="Input anchor file. Format: Chromosome Anchor(s) Strand\n\n", metavar="anchor_file", required=True)
-parser.add_argument("-b", "--bins", dest="numbins", default=10, 
+parser.add_argument("-b", "--bins", dest="numbins", default="10", 
                     help="Number of pixels to plot between each anchor, default is 10 pixels. (Can be a list)\n\n", metavar="bins")
 parser.add_argument("-o", "--output", dest="output", default="meta_out", help="Prefix for output scaled matrices, default is meta_out\n\n", metavar="output_prefix")
 parser.add_argument('-f', "--fig", dest='createfig', action='store_true', help="Set this to create figures, otherwise will save scaled average and median matrices for later figure creation and customization in python using numpy.loadtxt \n\n")
